@@ -1,0 +1,100 @@
+name: Publish Windows release
+run-name: "Publish Azflow from private run ${{ inputs.private_run_id }}"
+# Publishes one signed Windows build made by "Windows signed release" in the private
+# hgoudat/azflowai repository. The build is fetched, re-verified here (checksums, manifest,
+# Authenticode signer and timestamp, and that it starts), and published only after the owner
+# approves the azflow-release environment. Nothing is rebuilt.
+#
+# Secret: PRIVATE_ARTIFACT_READ_TOKEN, a fine-grained token with Actions: read on
+# hgoudat/azflowai only.
+on:
+  workflow_dispatch:
+    inputs:
+      private_run_id:
+        description: "Successful run ID of 'Windows signed release' in hgoudat/azflowai"
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: azflow-public-release
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.fetch.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Fetch the signed private build
+        id: fetch
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_READ_TOKEN }}
+          RUN_ID: ${{ inputs.private_run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUN_ID -notmatch '^[0-9]{1,20}$') { throw 'private_run_id must be a run ID.' }
+          $run = gh api "repos/hgoudat/azflowai/actions/runs/$env:RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'The private run could not be read.' }
+          if ($run.path -ne '.github/workflows/release-windows.yml' -or $run.conclusion -ne 'success') {
+            throw "Run $env:RUN_ID is $($run.path) ($($run.conclusion)), not a successful Windows signed release."
+          }
+          $artifacts = (gh api "repos/hgoudat/azflowai/actions/runs/$env:RUN_ID/artifacts" | ConvertFrom-Json).artifacts |
+            Where-Object { $_.name -match '^azflow-windows-signed-(v\d+\.\d+\.\d+)$' -and -not $_.expired }
+          if (@($artifacts).Count -ne 1) { throw 'Expected exactly one signed artifact in that run.' }
+          $tag = [regex]::Match($artifacts[0].name, 'v\d+\.\d+\.\d+$').Value
+          gh run download $env:RUN_ID -R hgoudat/azflowai -n $artifacts[0].name -D staging
+          if ($LASTEXITCODE -ne 0) { throw 'Download failed.' }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "Private run $env:RUN_ID ($($run.head_sha)) built $tag." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+      - name: Verify checksums, manifest and signatures
+        shell: pwsh
+        run: ./scripts/verify.ps1 -Staging staging -Tag ${{ steps.fetch.outputs.tag }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-${{ steps.fetch.outputs.tag }}
+          path: staging/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: verify
+    name: "Approve Azflow ${{ needs.verify.outputs.tag }}"
+    environment: azflow-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.verify.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: verified-${{ needs.verify.outputs.tag }}
+          path: staging
+      - name: Publish the verified files
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Published files are immutable: an existing release must already hold these bytes.
+            gh release download "$TAG" -p SHA256SUMS -D existing
+            cmp existing/SHA256SUMS staging/SHA256SUMS || { echo "::error::$TAG is already published with different files."; exit 1; }
+            echo "$TAG is already published with these files." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "Signed by FAJWAH LLC (Azure Artifact Signing). Verify downloads against SHA256SUMS."
+            echo
+            echo '```'
+            cat staging/SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" staging/* --target main --title "Azflow ${TAG#v}" --notes-file notes.md
+          echo "Published $TAG." >> "$GITHUB_STEP_SUMMARY"
