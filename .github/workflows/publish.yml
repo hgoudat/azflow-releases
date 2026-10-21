@@ -1,9 +1,11 @@
 name: Publish Windows release
 run-name: "Publish Azflow from private run ${{ inputs.private_run_id }}"
-# Publishes one signed Windows build made by "Windows signed release" in the private
-# hgoudat/azflowai repository. The build is fetched, re-verified here (checksums, manifest,
-# Authenticode signer and timestamp, and that it starts), and published only after the owner
-# approves the azflow-release environment. Nothing is rebuilt.
+# Publishes everything one run of "Windows signed release" in the private hgoudat/azflowai
+# repository built for a version tag: the signed Windows CLI, the signed Windows desktop
+# installer, the Linux CLI and the Linux desktop packages. Each set is fetched, re-verified here
+# (checksums, manifest, and the FAJWAH LLC Authenticode signer and timestamp for Windows files)
+# and published to one release only after the owner approves the azflow-release environment.
+# Nothing is rebuilt. The notarized macOS DMG is attached to the same release from the Mac.
 #
 # Secret: PRIVATE_ARTIFACT_READ_TOKEN, a fine-grained token with Actions: read on
 # hgoudat/azflowai only.
@@ -14,87 +16,196 @@ on:
         description: "Successful run ID of 'Windows signed release' in hgoudat/azflowai"
         required: true
         type: string
+      include_desktop:
+        description: "Also publish the Windows and Linux desktop installers (required when on)"
+        required: false
+        type: boolean
+        default: true
 permissions:
   contents: read
 concurrency:
   group: azflow-public-release
   cancel-in-progress: false
 jobs:
-  verify:
-    runs-on: windows-2025
-    timeout-minutes: 20
+  resolve:
+    name: Find the private build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
-      tag: ${{ steps.fetch.outputs.tag }}
+      tag: ${{ steps.find.outputs.tag }}
+    steps:
+      - name: Check the run and its artifacts
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_READ_TOKEN }}
+          RUN_ID: ${{ inputs.private_run_id }}
+          INCLUDE_DESKTOP: ${{ inputs.include_desktop }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || fail 'private_run_id must be a run ID.'
+          run=$(gh api "repos/hgoudat/azflowai/actions/runs/$RUN_ID") || fail 'The private run could not be read.'
+          path=$(jq -r .path <<<"$run"); conclusion=$(jq -r .conclusion <<<"$run")
+          [[ "$path" == .github/workflows/release-windows.yml && "$conclusion" == success ]] \
+            || fail "Run $RUN_ID is $path ($conclusion), not a successful Windows signed release."
+          listing=$(gh api --paginate "repos/hgoudat/azflowai/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.name, (.expired | tostring)] | @tsv') || fail 'The run artifacts could not be listed.'
+          signed=$(awk -F'\t' '$1 ~ /^azflow-windows-signed-v[0-9]+\.[0-9]+\.[0-9]+$/' <<<"$listing")
+          [[ $(grep -c . <<<"$signed" || true) -eq 1 ]] \
+            || fail 'Expected exactly one azflow-windows-signed-vX.Y.Z artifact (the signed Windows CLI) in that run.'
+          [[ $(cut -f2 <<<"$signed") == false ]] || fail "$(cut -f1 <<<"$signed") has expired; re-run the private release."
+          tag=${signed%%$'\t'*}; tag=${tag#azflow-windows-signed-}
+          required=("azflow-linux-cli-$tag")
+          if [[ "$INCLUDE_DESKTOP" == true ]]; then
+            required+=("azflow-windows-desktop-$tag" "azflow-linux-desktop-$tag")
+          fi
+          for name in "${required[@]}"; do
+            grep -qxF "$name"$'\tfalse' <<<"$listing" \
+              || fail "$name is missing or expired in run $RUN_ID. Set include_desktop to false to publish without the desktop installers."
+          done
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "Private run $RUN_ID ($(jq -r .head_sha <<<"$run")) built $tag."
+            echo "Sets: azflow-windows-signed-$tag ${required[*]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-windows:
+    name: Verify Windows files
+    needs: resolve
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_READ_TOKEN }}
+      RUN_ID: ${{ inputs.private_run_id }}
+      TAG: ${{ needs.resolve.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Fetch the signed private build
-        id: fetch
+      - name: Fetch the signed Windows CLI
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_READ_TOKEN }}
-          RUN_ID: ${{ inputs.private_run_id }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:RUN_ID -notmatch '^[0-9]{1,20}$') { throw 'private_run_id must be a run ID.' }
-          $run = gh api "repos/hgoudat/azflowai/actions/runs/$env:RUN_ID" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'The private run could not be read.' }
-          if ($run.path -ne '.github/workflows/release-windows.yml' -or $run.conclusion -ne 'success') {
-            throw "Run $env:RUN_ID is $($run.path) ($($run.conclusion)), not a successful Windows signed release."
-          }
-          $artifacts = (gh api "repos/hgoudat/azflowai/actions/runs/$env:RUN_ID/artifacts" | ConvertFrom-Json).artifacts |
-            Where-Object { $_.name -match '^azflow-windows-signed-(v\d+\.\d+\.\d+)$' -and -not $_.expired }
-          if (@($artifacts).Count -ne 1) { throw 'Expected exactly one signed artifact in that run.' }
-          $tag = [regex]::Match($artifacts[0].name, 'v\d+\.\d+\.\d+$').Value
-          gh run download $env:RUN_ID -R hgoudat/azflowai -n $artifacts[0].name -D staging
-          if ($LASTEXITCODE -ne 0) { throw 'Download failed.' }
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "Private run $env:RUN_ID ($($run.head_sha)) built $tag." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-      - name: Verify checksums, manifest and signatures
+          gh run download $env:RUN_ID -R hgoudat/azflowai -n "azflow-windows-signed-$env:TAG" -D staging/windows-cli
+          if ($LASTEXITCODE -ne 0) { throw 'Download of the signed Windows CLI failed.' }
+      - name: Verify the CLI checksums, manifest, signatures and that it starts
         shell: pwsh
-        run: ./scripts/verify.ps1 -Staging staging -Tag ${{ steps.fetch.outputs.tag }}
+        run: ./scripts/verify.ps1 -Kind cli -Staging staging/windows-cli -Tag $env:TAG
+      - name: Fetch the signed Windows desktop installer
+        if: inputs.include_desktop
+        shell: pwsh
+        run: |
+          gh run download $env:RUN_ID -R hgoudat/azflowai -n "azflow-windows-desktop-$env:TAG" -D staging/windows-desktop
+          if ($LASTEXITCODE -ne 0) { throw 'Download of the Windows desktop installer failed.' }
+      - name: Verify the installer checksums, manifest and signature
+        if: inputs.include_desktop
+        shell: pwsh
+        run: ./scripts/verify.ps1 -Kind desktop -Staging staging/windows-desktop -Tag $env:TAG
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: verified-${{ steps.fetch.outputs.tag }}
-          path: staging/*
+          name: verified-windows-${{ needs.resolve.outputs.tag }}
+          path: staging/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-linux:
+    name: Verify Linux files
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_READ_TOKEN }}
+      RUN_ID: ${{ inputs.private_run_id }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Fetch and verify the Linux CLI
+        run: |
+          gh run download "$RUN_ID" -R hgoudat/azflowai -n "azflow-linux-cli-$TAG" -D staging/linux-cli
+          ./scripts/verify-linux.sh cli staging/linux-cli "$TAG"
+      - name: Fetch and verify the Linux desktop packages
+        if: inputs.include_desktop
+        run: |
+          gh run download "$RUN_ID" -R hgoudat/azflowai -n "azflow-linux-desktop-$TAG" -D staging/linux-desktop
+          ./scripts/verify-linux.sh desktop staging/linux-desktop "$TAG"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-linux-${{ needs.resolve.outputs.tag }}
+          path: staging/
           if-no-files-found: error
           retention-days: 7
 
   publish:
-    needs: verify
-    name: "Approve Azflow ${{ needs.verify.outputs.tag }}"
+    needs: [resolve, verify-windows, verify-linux]
+    name: "Approve Azflow ${{ needs.resolve.outputs.tag }}"
     environment: azflow-release
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ needs.verify.outputs.tag }}
+      TAG: ${{ needs.resolve.outputs.tag }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: verified-${{ needs.verify.outputs.tag }}
-          path: staging
+          name: verified-windows-${{ needs.resolve.outputs.tag }}
+          path: verified/windows
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: verified-linux-${{ needs.resolve.outputs.tag }}
+          path: verified/linux
       - name: Publish the verified files
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          # Every verified set goes into one flat folder; two sets may never share a file name.
+          mkdir release
+          while IFS= read -r -d '' file; do
+            name=${file##*/}
+            [[ ! -e "release/$name" ]] || { echo "::error::Two verified sets both contain $name."; exit 1; }
+            cp -- "$file" "release/$name"
+          done < <(find verified -type f -print0)
+          ls -l release
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # Published files are immutable: an existing release must already hold these bytes.
-            gh release download "$TAG" -p SHA256SUMS -D existing
-            cmp existing/SHA256SUMS staging/SHA256SUMS || { echo "::error::$TAG is already published with different files."; exit 1; }
-            echo "$TAG is already published with these files." >> "$GITHUB_STEP_SUMMARY"
+            # Published files are immutable: every file already on the release must hold these
+            # exact bytes. Files it does not have yet (for example the desktop installers on a
+            # release made before they existed) are added; nothing is replaced or removed.
+            existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            new=()
+            for file in release/*; do
+              name=${file##*/}
+              if grep -qxF -- "$name" <<<"$existing"; then
+                gh release download "$TAG" -p "$name" -D existing
+                cmp -- "existing/$name" "$file" \
+                  || { echo "::error::$TAG already has a different $name."; exit 1; }
+              else
+                new+=("$file")
+              fi
+            done
+            if (( ${#new[@]} )); then
+              gh release upload "$TAG" "${new[@]}"
+              printf 'Added to %s: %s\n' "$TAG" "${new[*]##*/}" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "$TAG is already published with these files." >> "$GITHUB_STEP_SUMMARY"
+            fi
             exit 0
           fi
+
           {
-            echo "Signed by FAJWAH LLC (Azure Artifact Signing). Verify downloads against SHA256SUMS."
-            echo
-            echo '```'
-            cat staging/SHA256SUMS
-            echo '```'
+            echo "Windows files are signed by FAJWAH LLC (Azure Artifact Signing). Linux files are not"
+            echo "code-signed. Verify each download against its platform's SHA256SUMS file."
+            echo "The notarized macOS DMG is added to this release separately."
+            for sums in release/SHA256SUMS*; do
+              echo
+              echo "${sums##*/}:"
+              echo '```'
+              cat "$sums"
+              echo '```'
+            done
           } > notes.md
-          gh release create "$TAG" staging/* --target main --title "Azflow AI ${TAG#v}" --notes-file notes.md
+          gh release create "$TAG" release/* --target main --title "Azflow AI ${TAG#v}" --notes-file notes.md
           echo "Published $TAG." >> "$GITHUB_STEP_SUMMARY"
