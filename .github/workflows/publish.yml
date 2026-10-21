@@ -96,5 +96,5 @@ jobs:
             cat staging/SHA256SUMS
             echo '```'
           } > notes.md
-          gh release create "$TAG" staging/* --target main --title "Azflow ${TAG#v}" --notes-file notes.md
+          gh release create "$TAG" staging/* --target main --title "Azflow AI ${TAG#v}" --notes-file notes.md
           echo "Published $TAG." >> "$GITHUB_STEP_SUMMARY"
