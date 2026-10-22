@@ -1,14 +1,11 @@
-# Verifies a downloaded private Windows build before it can be published.
+# Verifies a downloaded private Windows desktop build before it can be published.
 # Every check must pass; any failure throws and nothing is published.
-#   -Kind cli      azflow-windows-signed-<tag>: SHA256SUMS, release.json, zips whose executables
-#                  are signed, timestamped and start.
-#   -Kind desktop  azflow-windows-desktop-<tag>: SHA256SUMS-windows-desktop,
-#                  release-windows-desktop.json and the signed, timestamped NSIS installer
-#                  (never executed). An updater signature <installer>.sig may sit beside it.
+# Checks azflow-windows-desktop-<tag>: SHA256SUMS-windows-desktop, release-windows-desktop.json
+# and the signed, timestamped NSIS installer (never executed). An updater signature
+# <installer>.sig may sit beside it.
 param(
   [Parameter(Mandatory)] [string] $Staging,
-  [Parameter(Mandatory)] [string] $Tag,
-  [ValidateSet('cli', 'desktop')] [string] $Kind = 'cli'
+  [Parameter(Mandatory)] [string] $Tag
 )
 $ErrorActionPreference = 'Stop'
 # The validated FAJWAH LLC PublicTrust profile (Azure Artifact Signing).
@@ -31,17 +28,14 @@ function Assert-UpdaterSignature([string] $Path) {
   if (-not $decoded.StartsWith('untrusted comment:')) { throw "$Path is not an updater signature." }
 }
 
-$sumsName, $manifestName, $platform = if ($Kind -eq 'cli') {
-  'SHA256SUMS', 'release.json', ''
-} else {
-  'SHA256SUMS-windows-desktop', 'release-windows-desktop.json', 'win32-desktop'
-}
+$sumsName = 'SHA256SUMS-windows-desktop'
+$manifestName = 'release-windows-desktop.json'
 $sums = Join-Path $Staging $sumsName
 $manifestPath = Join-Path $Staging $manifestName
 if (-not (Test-Path $sums) -or -not (Test-Path $manifestPath)) { throw "$sumsName or $manifestName is missing." }
 
-# Exactly the files the checksum list names, each with its listed hash (plus, for the
-# installer, an optional updater signature, which is made after the checksums).
+# Exactly the files the checksum list names, each with its listed hash (plus an optional
+# updater signature for the installer, which is made after the checksums).
 $listed = @{}
 foreach ($line in Get-Content $sums) {
   if ($line -notmatch '^([0-9a-f]{64})  ([A-Za-z0-9._-]+)$') { throw "Malformed $sumsName line: $line" }
@@ -49,7 +43,7 @@ foreach ($line in Get-Content $sums) {
 }
 $present = @()
 foreach ($name in (Get-ChildItem $Staging -File | Where-Object Name -ne $sumsName | ForEach-Object Name)) {
-  if ($Kind -eq 'desktop' -and $name -like '*.exe.sig' -and $listed.ContainsKey($name.Substring(0, $name.Length - 4))) {
+  if ($name -like '*.exe.sig' -and $listed.ContainsKey($name.Substring(0, $name.Length - 4))) {
     Assert-UpdaterSignature (Join-Path $Staging $name)
     continue
   }
@@ -64,44 +58,22 @@ foreach ($name in $listed.Keys) {
 $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.tag -ne $Tag -or "v$($manifest.version)" -ne $Tag) { throw "$manifestName is for $($manifest.tag), not $Tag." }
 if ($manifest.signer -ne $Signer) { throw "$manifestName names an unexpected signer: $($manifest.signer)" }
-if ($platform -and $manifest.platform -ne $platform) { throw "$manifestName is for $($manifest.platform), not $platform." }
+if ($manifest.platform -ne 'win32-desktop') { throw "$manifestName is for $($manifest.platform), not win32-desktop." }
 if (@($manifest.files).Count -eq 0) { throw "$manifestName lists no files." }
-if ($Kind -eq 'desktop' -and @(Compare-Object @($manifest.files.name) @($listed.Keys | Where-Object { $_ -ne $manifestName })).Count) {
+if (@(Compare-Object @($manifest.files.name) @($listed.Keys | Where-Object { $_ -ne $manifestName })).Count) {
   throw "$manifestName and $sumsName list different files."
 }
 
-if ($Kind -eq 'desktop') {
-  # The installer is itself the signed file: its manifest `contains` names only itself.
-  # It is never run here.
-  foreach ($file in $manifest.files) {
-    $installer = Join-Path $Staging $file.name
-    if ($file.name -notlike '*.exe' -or -not $listed.ContainsKey($file.name)) { throw "Unexpected installer entry: $($file.name)" }
-    if ((Get-Sha256 $installer) -ne $file.sha256) { throw "$manifestName hash mismatch: $($file.name)" }
-    $contains = @($file.contains.PSObject.Properties)
-    if ($contains.Count -ne 1 -or $contains[0].Name -ne $file.name -or $contains[0].Value -ne $file.sha256) {
-      throw "$manifestName must list $($file.name) as its own signed content."
-    }
-    Assert-Signed $installer $file.name
-  }
-  Write-Output "Verified Windows desktop $Tag."
-  return
-}
-
-# Each archive: its manifest hash, then every executable inside signed, timestamped and runnable.
-$extract = Join-Path $env:RUNNER_TEMP 'azflow-verify'
+# The installer is itself the signed file: its manifest `contains` names only itself.
+# It is never run here.
 foreach ($file in $manifest.files) {
-  $archive = Join-Path $Staging $file.name
-  if ((Get-Sha256 $archive) -ne $file.sha256) { throw "release.json hash mismatch: $($file.name)" }
-  Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
-  Expand-Archive -LiteralPath $archive -DestinationPath $extract
-  $inside = Get-ChildItem $extract -File -Recurse
-  if ($inside.Count -ne @($file.contains.PSObject.Properties).Count) { throw "Unexpected contents in $($file.name)" }
-  foreach ($entry in $file.contains.PSObject.Properties) {
-    $path = Join-Path $extract $entry.Name
-    if ((Get-Sha256 $path) -ne $entry.Value) { throw "Hash mismatch for $($entry.Name) in $($file.name)" }
-    Assert-Signed $path "$($entry.Name) in $($file.name)"
-    & $path --version
-    if ($LASTEXITCODE -ne 0) { throw "$($entry.Name) does not start." }
+  $installer = Join-Path $Staging $file.name
+  if ($file.name -notlike '*.exe' -or -not $listed.ContainsKey($file.name)) { throw "Unexpected installer entry: $($file.name)" }
+  if ((Get-Sha256 $installer) -ne $file.sha256) { throw "$manifestName hash mismatch: $($file.name)" }
+  $contains = @($file.contains.PSObject.Properties)
+  if ($contains.Count -ne 1 -or $contains[0].Name -ne $file.name -or $contains[0].Value -ne $file.sha256) {
+    throw "$manifestName must list $($file.name) as its own signed content."
   }
+  Assert-Signed $installer $file.name
 }
-Write-Output "Verified $Tag."
+Write-Output "Verified Windows desktop $Tag."
