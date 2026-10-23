@@ -1,8 +1,8 @@
-name: Publish Windows release
+name: Publish release
 run-name: "Publish Azflow from private run ${{ inputs.private_run_id }}"
-# Publishes everything one run of "Windows signed release" in the private hgoudat/azflowai
-# repository built for a version tag: the signed Windows CLI, the signed Windows desktop
-# installer, the Linux CLI and the Linux desktop packages. Each set is fetched, re-verified here
+# Publishes everything one run of "Release" in the private hgoudat/azflowai repository built
+# for a version tag: the signed Windows desktop installer and the Linux desktop packages. Each
+# set is fetched, re-verified here
 # (checksums, manifest, and the FAJWAH LLC Authenticode signer and timestamp for Windows files)
 # and published to one release only after the owner approves the azflow-release environment.
 # Nothing is rebuilt. The notarized macOS DMG is attached to the same release from the Mac.
@@ -13,14 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       private_run_id:
-        description: "Successful run ID of 'Windows signed release' in hgoudat/azflowai"
+        description: "Successful run ID of 'Release' in hgoudat/azflowai"
         required: true
         type: string
-      include_desktop:
-        description: "Also publish the Windows and Linux desktop installers (required when on)"
-        required: false
-        type: boolean
-        default: true
 permissions:
   contents: read
 concurrency:
@@ -39,34 +34,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_READ_TOKEN }}
           RUN_ID: ${{ inputs.private_run_id }}
-          INCLUDE_DESKTOP: ${{ inputs.include_desktop }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$*"; exit 1; }
           [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || fail 'private_run_id must be a run ID.'
           run=$(gh api "repos/hgoudat/azflowai/actions/runs/$RUN_ID") || fail 'The private run could not be read.'
           path=$(jq -r .path <<<"$run"); conclusion=$(jq -r .conclusion <<<"$run")
-          [[ "$path" == .github/workflows/release-windows.yml && "$conclusion" == success ]] \
-            || fail "Run $RUN_ID is $path ($conclusion), not a successful Windows signed release."
+          [[ "$path" == .github/workflows/release.yml && "$conclusion" == success ]] \
+            || fail "Run $RUN_ID is $path ($conclusion), not a successful Release run."
           listing=$(gh api --paginate "repos/hgoudat/azflowai/actions/runs/$RUN_ID/artifacts?per_page=100" \
             --jq '.artifacts[] | [.name, (.expired | tostring)] | @tsv') || fail 'The run artifacts could not be listed.'
-          signed=$(awk -F'\t' '$1 ~ /^azflow-windows-signed-v[0-9]+\.[0-9]+\.[0-9]+$/' <<<"$listing")
-          [[ $(grep -c . <<<"$signed" || true) -eq 1 ]] \
-            || fail 'Expected exactly one azflow-windows-signed-vX.Y.Z artifact (the signed Windows CLI) in that run.'
-          [[ $(cut -f2 <<<"$signed") == false ]] || fail "$(cut -f1 <<<"$signed") has expired; re-run the private release."
-          tag=${signed%%$'\t'*}; tag=${tag#azflow-windows-signed-}
-          required=("azflow-linux-cli-$tag")
-          if [[ "$INCLUDE_DESKTOP" == true ]]; then
-            required+=("azflow-windows-desktop-$tag" "azflow-linux-desktop-$tag")
-          fi
-          for name in "${required[@]}"; do
+          windows=$(awk -F'\t' '$1 ~ /^azflow-windows-desktop-v[0-9]+\.[0-9]+\.[0-9]+$/' <<<"$listing")
+          [[ $(grep -c . <<<"$windows" || true) -eq 1 ]] \
+            || fail 'Expected exactly one azflow-windows-desktop-vX.Y.Z artifact in that run.'
+          tag=${windows%%$'\t'*}; tag=${tag#azflow-windows-desktop-}
+          for name in "azflow-windows-desktop-$tag" "azflow-linux-desktop-$tag"; do
             grep -qxF "$name"$'\tfalse' <<<"$listing" \
-              || fail "$name is missing or expired in run $RUN_ID. Set include_desktop to false to publish without the desktop installers."
+              || fail "$name is missing or expired in run $RUN_ID; re-run the private release."
           done
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           {
             echo "Private run $RUN_ID ($(jq -r .head_sha <<<"$run")) built $tag."
-            echo "Sets: azflow-windows-signed-$tag ${required[*]}"
+            echo "Sets: azflow-windows-desktop-$tag azflow-linux-desktop-$tag"
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify-windows:
@@ -82,24 +71,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Fetch the signed Windows CLI
-        shell: pwsh
-        run: |
-          gh run download $env:RUN_ID -R hgoudat/azflowai -n "azflow-windows-signed-$env:TAG" -D staging/windows-cli
-          if ($LASTEXITCODE -ne 0) { throw 'Download of the signed Windows CLI failed.' }
-      - name: Verify the CLI checksums, manifest, signatures and that it starts
-        shell: pwsh
-        run: ./scripts/verify.ps1 -Kind cli -Staging staging/windows-cli -Tag $env:TAG
       - name: Fetch the signed Windows desktop installer
-        if: inputs.include_desktop
         shell: pwsh
         run: |
           gh run download $env:RUN_ID -R hgoudat/azflowai -n "azflow-windows-desktop-$env:TAG" -D staging/windows-desktop
           if ($LASTEXITCODE -ne 0) { throw 'Download of the Windows desktop installer failed.' }
       - name: Verify the installer checksums, manifest and signature
-        if: inputs.include_desktop
         shell: pwsh
-        run: ./scripts/verify.ps1 -Kind desktop -Staging staging/windows-desktop -Tag $env:TAG
+        run: ./scripts/verify.ps1 -Staging staging/windows-desktop -Tag $env:TAG
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: verified-windows-${{ needs.resolve.outputs.tag }}
@@ -120,15 +99,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Fetch and verify the Linux CLI
-        run: |
-          gh run download "$RUN_ID" -R hgoudat/azflowai -n "azflow-linux-cli-$TAG" -D staging/linux-cli
-          ./scripts/verify-linux.sh cli staging/linux-cli "$TAG"
       - name: Fetch and verify the Linux desktop packages
-        if: inputs.include_desktop
         run: |
           gh run download "$RUN_ID" -R hgoudat/azflowai -n "azflow-linux-desktop-$TAG" -D staging/linux-desktop
-          ./scripts/verify-linux.sh desktop staging/linux-desktop "$TAG"
+          ./scripts/verify-linux.sh staging/linux-desktop "$TAG"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: verified-linux-${{ needs.resolve.outputs.tag }}

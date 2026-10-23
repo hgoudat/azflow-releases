@@ -18,11 +18,10 @@ release. Each release's version is in its title, tag and `release*.json` files.
 
 - `Azflow-AI-windows-x64-setup.exe` — the Azflow AI desktop app installer (per-user, no
   administrator rights needed). The installer and every executable inside it are signed.
-- `azflow-cli-windows-x64.zip` — the Azflow command-line tool (`azflow-cli.exe`) on its own.
+  The `azflow-cli` tool ships inside it and is added to your `PATH`.
 - Everything is signed by **FAJWAH LLC** through Azure Artifact Signing, with a timestamp.
-- `SHA256SUMS` and `release.json` cover the CLI zip (the manifest records the hash of each
-  executable inside it); `SHA256SUMS-windows-desktop` and `release-windows-desktop.json` cover
-  the installer. A `.sig` next to the installer is the in-app updater's signature.
+- `SHA256SUMS-windows-desktop` and `release-windows-desktop.json` cover the installer. A `.sig`
+  next to the installer is the in-app updater's signature.
 
 Check a download in PowerShell:
 
@@ -37,25 +36,20 @@ Get-AuthenticodeSignature .\Azflow-AI-windows-x64-setup.exe | Format-List Status
   (`chmod +x`, then run it).
 - `azflow-ai-linux-amd64.deb` — the same app for Debian 12, Ubuntu 22.04 and later
   (`sudo apt install ./azflow-ai-linux-amd64.deb`).
-- `azflow-cli-linux-x64.tar.gz` — the Azflow command-line tool on its own.
-- Linux has no common code-signing scheme. Check the desktop files against
-  `SHA256SUMS-linux-desktop` and the CLI against `SHA256SUMS-linux`
+- Linux has no common code-signing scheme. Check the files against `SHA256SUMS-linux-desktop`
   (`sha256sum -c --ignore-missing SHA256SUMS-linux-desktop`). A `.sig` next to the AppImage is
   the in-app updater's signature.
 
 ## How a release is published
 
-1. A version tag in the private repository runs **Windows signed release**. One run builds and
-   signs the Windows CLI and the Windows desktop installer, builds the Linux CLI and the Linux
-   desktop packages, and keeps each set as a private artifact.
-2. **Publish Windows release** here takes that run's ID and checks that the run succeeded and
-   holds every set for one tag. The signed Windows CLI is always required; the desktop sets are
-   required too unless `include_desktop` is turned off.
+1. A version tag in the private repository runs **Release**. One run builds and signs the
+   Windows desktop installer, builds the Linux desktop packages, and keeps each as a private
+   artifact.
+2. **Publish release** here takes that run's ID and checks that the run succeeded and holds
+   both sets for one tag.
 3. Each set is downloaded and verified again here, nothing is rebuilt and no installer is run:
-   - Windows CLI: checksums, `release.json`, the FAJWAH LLC signer and timestamp on every
-     executable, and that each one starts.
-   - Windows desktop: checksums, `release-windows-desktop.json` names this version, and the
-     installer's FAJWAH LLC signature and timestamp.
+   - Windows: checksums, `release-windows-desktop.json` names this version, and the installer's
+     FAJWAH LLC signature and timestamp.
    - Linux: checksums and manifests for this version, the `.deb` is a valid amd64 Debian
      package of this version, and the AppImage is an AppImage (ELF) file.
 4. The owner approves the `azflow-release` environment; all verified files are then attached
