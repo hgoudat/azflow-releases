@@ -170,8 +170,9 @@ jobs:
           fi
 
           {
-            echo "Windows files are signed by FAJWAH LLC (Azure Artifact Signing). Linux files are not"
-            echo "code-signed. Verify each download against its platform's SHA256SUMS file."
+            echo "Windows files are signed by FAJWAH LLC (Azure Artifact Signing). The Linux checksum list"
+            echo "is signed by the Azflow AI Releases key (fingerprint 06E7 46E2 5616 5BC1 B6CF 4970 E052 B1E9 667A 82A0)."
+            echo "Verify each download against its platform's SHA256SUMS file."
             echo "The notarized macOS DMG is added to this release separately."
             for sums in release/SHA256SUMS*; do
               echo

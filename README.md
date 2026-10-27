@@ -13,6 +13,13 @@ release. Each release's version is in its title, tag and `release*.json` files.
 - `SHA256SUMS-macos` and `release-macos.json` list the DMG's SHA-256 and notarization ID.
 - The DMG is built and notarized on the owner's Mac and attached to the release by hand after
   the release is published; it is not part of the automated publish.
+- `Azflow-AI-macos-arm64.app.tar.gz` and its `.sig` are what the app downloads when it updates itself.
+
+## Updates
+
+From 0.4.0 the desktop app updates itself. `latest.json` on the newest release lists each
+platform's update file and its signature; the app accepts only files signed with the key built
+into it. It is attached last, after every other file of the release.
 
 ## Windows
 
@@ -36,9 +43,18 @@ Get-AuthenticodeSignature .\Azflow-AI-windows-x64-setup.exe | Format-List Status
   (`chmod +x`, then run it).
 - `azflow-ai-linux-amd64.deb` — the same app for Debian 12, Ubuntu 22.04 and later
   (`sudo apt install ./azflow-ai-linux-amd64.deb`).
-- Linux has no common code-signing scheme. Check the files against `SHA256SUMS-linux-desktop`
-  (`sha256sum -c --ignore-missing SHA256SUMS-linux-desktop`). A `.sig` next to the AppImage is
-  the in-app updater's signature.
+- `SHA256SUMS-linux-desktop` lists the files' SHA-256 hashes, and `SHA256SUMS-linux-desktop.asc`
+  signs that list with the **Azflow AI Releases** key ([keys/azflow-archive-keyring.asc](keys/azflow-archive-keyring.asc)),
+  fingerprint `06E7 46E2 5616 5BC1 B6CF  4970 E052 B1E9 667A 82A0`. A `.sig` next to the AppImage
+  is the in-app updater's signature.
+
+Check a download:
+
+```bash
+gpg --import azflow-archive-keyring.asc
+gpg --verify SHA256SUMS-linux-desktop.asc SHA256SUMS-linux-desktop
+sha256sum -c --ignore-missing SHA256SUMS-linux-desktop
+```
 
 ## How a release is published
 
@@ -50,10 +66,11 @@ Get-AuthenticodeSignature .\Azflow-AI-windows-x64-setup.exe | Format-List Status
 3. Each set is downloaded and verified again here, nothing is rebuilt and no installer is run:
    - Windows: checksums, `release-windows-desktop.json` names this version, and the installer's
      FAJWAH LLC signature and timestamp.
-   - Linux: checksums and manifests for this version, the `.deb` is a valid amd64 Debian
-     package of this version, and the AppImage is an AppImage (ELF) file.
+   - Linux: checksums and manifests for this version, the checksum list's signature by the
+     pinned Azflow AI Releases key, the `.deb` is a valid amd64 Debian package of this version,
+     and the AppImage is an AppImage (ELF) file.
 4. The owner approves the `azflow-release` environment; all verified files are then attached
    to one GitHub release, `vX.Y.Z`. Published files are immutable: if the release already
    exists, every file it already has must be byte-identical, and only missing files are added.
-5. The notarized macOS DMG and its `SHA256SUMS-macos` and `release-macos.json` are then
-   attached to the same release from the Mac.
+5. The notarized macOS DMG, the macOS update file and its `.sig`, `SHA256SUMS-macos` and
+   `release-macos.json` are then attached to the same release from the Mac, and `latest.json` last.
