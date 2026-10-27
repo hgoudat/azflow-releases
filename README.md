@@ -56,21 +56,32 @@ gpg --verify SHA256SUMS-linux-desktop.asc SHA256SUMS-linux-desktop
 sha256sum -c --ignore-missing SHA256SUMS-linux-desktop
 ```
 
+## Verifying downloads
+
+Every release carries a `SHA256SUMS-<platform>` file listing each download's SHA-256 hash.
+
+- **macOS:** the app is notarized by Apple; macOS checks it when you open it. To compare the hash:
+  `shasum -a 256 -c --ignore-missing SHA256SUMS-macos`.
+- **Windows:** the installer is signed by FAJWAH LLC (commands under [Windows](#windows)).
+- **Linux:** check the signed checksum list, then the files (commands under [Linux](#linux)).
+
 ## How a release is published
 
-1. A version tag in the private repository runs **Release**. One run builds and signs the
+1. The release's "What's new" goes in `notes/vX.Y.Z.md` here; the release page is that text plus a
+   standard downloads and verification section. Publishing stops if the file is missing.
+2. A version tag in the private repository runs **Release**. One run builds and signs the
    Windows desktop installer, builds the Linux desktop packages, and keeps each as a private
    artifact.
-2. **Publish release** here takes that run's ID and checks that the run succeeded and holds
+3. **Publish release** here takes that run's ID and checks that the run succeeded and holds
    both sets for one tag.
-3. Each set is downloaded and verified again here, nothing is rebuilt and no installer is run:
+4. Each set is downloaded and verified again here, nothing is rebuilt and no installer is run:
    - Windows: checksums, `release-windows-desktop.json` names this version, and the installer's
      FAJWAH LLC signature and timestamp.
    - Linux: checksums and manifests for this version, the checksum list's signature by the
      pinned Azflow AI Releases key, the `.deb` is a valid amd64 Debian package of this version,
      and the AppImage is an AppImage (ELF) file.
-4. The owner approves the `azflow-release` environment; all verified files are then attached
+5. The owner approves the `azflow-release` environment; all verified files are then attached
    to one GitHub release, `vX.Y.Z`. Published files are immutable: if the release already
    exists, every file it already has must be byte-identical, and only missing files are added.
-5. The notarized macOS DMG, the macOS update file and its `.sig`, `SHA256SUMS-macos` and
+6. The notarized macOS DMG, the macOS update file and its `.sig`, `SHA256SUMS-macos` and
    `release-macos.json` are then attached to the same release from the Mac, and `latest.json` last.
