@@ -52,6 +52,8 @@ jobs:
             grep -qxF "$name"$'\tfalse' <<<"$listing" \
               || fail "$name is missing or expired in run $RUN_ID; re-run the private release."
           done
+          curl -fsS -o /dev/null "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/notes/$tag.md" \
+            || fail "notes/$tag.md is missing: add the release's What's new there first."
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           {
             echo "Private run $RUN_ID ($(jq -r .head_sha <<<"$run")) built $tag."
@@ -123,6 +125,10 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.resolve.outputs.tag }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: notes
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: verified-windows-${{ needs.resolve.outputs.tag }}
@@ -169,18 +175,20 @@ jobs:
             exit 0
           fi
 
+          # What's new comes from notes/<tag>.md in this repository; the rest is the same every time.
+          [[ -s "notes/$TAG.md" ]] || { echo "::error::notes/$TAG.md is missing or empty."; exit 1; }
           {
-            echo "Windows files are signed by FAJWAH LLC (Azure Artifact Signing). The Linux checksum list"
-            echo "is signed by the Azflow AI Releases key (fingerprint 06E7 46E2 5616 5BC1 B6CF 4970 E052 B1E9 667A 82A0)."
-            echo "Verify each download against its platform's SHA256SUMS file."
-            echo "The notarized macOS DMG is added to this release separately."
-            for sums in release/SHA256SUMS*; do
-              echo
-              echo "${sums##*/}:"
-              echo '```'
-              cat "$sums"
-              echo '```'
-            done
+            cat "notes/$TAG.md"
+            echo
+            echo '## Downloads'
+            echo
+            echo '| Platform | File |'
+            echo '| --- | --- |'
+            echo '| macOS (Apple silicon) | `Azflow-AI-macos-arm64.dmg` |'
+            echo '| Windows x64 | `Azflow-AI-windows-x64-setup.exe` |'
+            echo '| Linux x64 | `Azflow-AI-linux-x64.AppImage` or `azflow-ai-linux-amd64.deb` |'
+            echo
+            echo 'The macOS app is notarized by Apple, and Windows files are signed by FAJWAH LLC. The Linux checksum list is signed by the Azflow AI Releases key. To check a download, see [Verifying downloads](https://github.com/hgoudat/azflow-releases#verifying-downloads).'
           } > notes.md
           gh release create "$TAG" release/* --target main --title "Azflow AI ${TAG#v}" --notes-file notes.md
           echo "Published $TAG." >> "$GITHUB_STEP_SUMMARY"
