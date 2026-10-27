@@ -3,12 +3,17 @@
 # Every check must pass; any failure exits non-zero and nothing is published.
 #   verify-linux.sh <staging> <tag>   azflow-linux-desktop-<tag>: SHA256SUMS-linux-desktop,
 #                                     release-linux-desktop.json, a valid .deb and an
-#                                     AppImage ELF (an updater .sig may sit beside it).
-# Linux files are not code-signed; nothing is executed here.
+#                                     AppImage ELF (an updater .sig may sit beside it, and
+#                                     SHA256SUMS-linux-desktop.asc, which must be a valid
+#                                     signature by the key in keys/azflow-archive-keyring.asc).
+# Nothing is executed here.
 set -euo pipefail
 
 fail() { echo "::error::$*" >&2; exit 1; }
 sha() { sha256sum -- "$1" | cut -d' ' -f1; }
+# The Azflow AI Releases signing key (keys/azflow-archive-keyring.asc), pinned by fingerprint.
+GPG_FINGERPRINT=06E746E256165BC1B6CF4970E052B1E9667A82A0
+KEYRING=$(cd "$(dirname "$0")/.." && pwd)/keys/azflow-archive-keyring.asc
 
 [[ $# -eq 2 ]] || fail "Usage: verify-linux.sh <staging> <tag>"
 dir=$1 tag=$2
@@ -36,6 +41,17 @@ for path in "$dir"/* "$dir"/.[!.]*; do
     # A Tauri updater signature: base64 of a minisign signature. Its key is checked by the app.
     decoded=$(base64 -d < "$path" 2>/dev/null) || fail "$name is not base64."
     [[ $decoded == 'untrusted comment:'* ]] || fail "$name is not an updater signature."
+    continue
+  fi
+  if [[ $name == "$sums.asc" ]]; then
+    home=$(mktemp -d); trap 'rm -rf "$home"' EXIT
+    gpg --homedir "$home" --batch --quiet --import "$KEYRING" 2>/dev/null || fail "The signing key could not be read."
+    gpg --homedir "$home" --batch --with-colons --list-keys | grep -qx "fpr:::::::::$GPG_FINGERPRINT:" \
+      || fail "keys/azflow-archive-keyring.asc is not the pinned signing key."
+    status=$(gpg --homedir "$home" --batch --status-fd 1 --verify "$path" "$dir/$sums" 2>/dev/null) \
+      || fail "$name is not a valid signature of $sums."
+    grep -q "^\[GNUPG:\] VALIDSIG $GPG_FINGERPRINT " <<<"$status" || fail "$name is not signed by $GPG_FINGERPRINT."
+    echo "$name: good signature by $GPG_FINGERPRINT"
     continue
   fi
   fail "Not listed in $sums: $name"
